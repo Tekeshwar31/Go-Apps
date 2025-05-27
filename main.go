@@ -1,130 +1,122 @@
 package main
 
 import (
-	"net/http"
-	"os"
-	"log"
+	"bytes"
+	"encoding/json"
 	"fmt"
-	"github.com/gin-gonic/gin"
-	"github.com/joho/godotenv"
-	supabase "github.com/nedpals/supabase-go"
+	"io/ioutil"
+   "net/http"
 )
-// Define Todo struct
-type response struct {
-    Status  string      `json:"status"`
-    Data interface{} `json:"data"`
+
+type SupabaseClient struct {
+	BaseURL    string
+	APIKey     string
+	HTTPClient *http.Client
 }
 
-type User struct {
-    Name  string `json:"name"`
-    Email string `json:"email"`  
-	Phone string `json:"phone"`  
+type apiResponse struct {
+	Data   json.RawMessage `json:"data"`
+	Status string          `json:"status"`
+}
+
+
+func NewSupabaseClient(baseURL, apiKey string) *SupabaseClient {
+	return &SupabaseClient{
+		BaseURL:    baseURL,
+		APIKey:     apiKey,
+		HTTPClient: &http.Client{},
+	}
+}
+
+func (c *SupabaseClient) Request(method, path string, body interface{}) ([]byte, error) {
+	var reqBody []byte
+	var err error
+
+	if body != nil {
+		reqBody, err = json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	req, err := http.NewRequest(method, c.BaseURL+path, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("apikey", c.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("supabase error: %s", string(respBody))
+	}
+
+	return respBody, nil
 }
 
 func main() {
-	    // Load .env file
-		err := godotenv.Load()
-		if err != nil {
-			log.Fatal("Error loading .env file")
-		}
 	// Initialize Supabase client
-	supabaseUrl := os.Getenv("SUPABASE_URL")
-	supabaseKey := os.Getenv("SUPABASE_KEY")
-	supabase := supabase.CreateClient(supabaseUrl,supabaseKey)
+	client := NewSupabaseClient(
+		"https://bkuaxwxcwolujjwzhfvb.supabase.co/rest/v1/",
+		"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJrdWF4d3hjd29sdWpqd3poZnZiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDgzMjY5MDksImV4cCI6MjA2MzkwMjkwOX0.WisnF6wJQBLvEaZvRKtZqtxIoOhZk60eO_-3QB2Iw3c",
+	)
 
-	fmt.Println("Supabase URL:", supabaseUrl)
-	
-	// Create router
-	r := gin.Default()
-	
-	// Simple route
-	r.GET("/hello", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"message": "Hello World!",
-		})
+	// Create HTTP server
+	http.HandleFunc("/users", func(w http.ResponseWriter, r *http.Request) {
+		// Only allow GET requests
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		// query := "users?email=eq.west@example.com"
+		query := "users?select*"
+		// Get users from Supabase
+		resp, err := client.Request("GET", query, nil)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Error fetching users: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		// Set response headers
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+
+		    // Create a response struct
+
+			response := apiResponse{
+				Status: "success",
+				Data:   resp,
+			}
+		
+			// Marshal the response to JSON
+			jsonResponse, err := json.Marshal(response)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("Error formatting response: %v", err), http.StatusInternalServerError)
+				return
+			}
+		
+			// Set response headers
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+		
+			// Send the formatted response
+			w.Write(jsonResponse)
 	})
 
-	// Route to get all users
-	r.GET("/users", func(c *gin.Context) {
-		var result [] any
-		err := supabase.DB.From("users").Select("*").Execute(&result)
-
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"Status": "error",
-				"error": err,
-			})
-			return
-		}
-		 log.Printf("Retrieved todos: %+v", result) 
-		 c.JSON(http.StatusOK, response{
-			Status:  "Success",
-			Data: result,
-		})
-	})
-
-	// Route to create a new user
-	r.POST("/users", func(c *gin.Context) {
-		var newUser User
-		
-		if err := c.ShouldBindJSON(&newUser); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error":   "Invalid request payload",
-				"details": err.Error(),
-			})
-			return
-		}
-	
-		// Check if email exists
-		var existingUsers [] any
-		err := supabase.DB.From("users").
-			Select("*").
-			Filter("email", "eq", newUser.Email).  // Use the email from request
-			Execute(&existingUsers)
-		
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error":   "Failed to check existing users",
-				"details": err.Error(),
-			})
-			return
-		}
-		
-		if len(existingUsers) > 0 {
-			c.JSON(http.StatusConflict, gin.H{  // 409 Conflict is more appropriate
-				"error": "Email already exists",
-			})
-			return
-		}
-	
-		// Insert new user
-		var insertedUsers []User 
-		err = supabase.DB.From("users").Insert(newUser).Execute(&insertedUsers)  // Note: = instead of :=
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error":   "Failed to create user",
-				"details": err.Error(),
-			})
-			return
-		}
-
-		if len(insertedUsers) == 0 {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "No user was created",
-			})
-			return
-		}
-	
-		c.JSON(http.StatusCreated, gin.H{  // 201 Created for successful resource creation
-			"message": "User created successfully",
-			"user":    insertedUsers[0],  // Return the first inserted user
-		})
-	})
-
-	// r.PUT("/users/:id", func(c *gin.Context) {
-	// 	id := c.Param("id")
-	// })
-
-	r.Run(":8082") // Default port 8080
+	// Start the server
+	fmt.Println("Server listening on :8080")
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		fmt.Printf("Error starting server: %v\n", err)
+	}
 }
-
